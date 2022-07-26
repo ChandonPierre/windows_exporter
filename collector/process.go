@@ -115,6 +115,7 @@ type processCollector struct {
 	WorkingSet        *prometheus.Desc
 	GpuSharedMemory    *prometheus.Desc
 	GpuDedicatedMemory *prometheus.Desc
+	GpuUsage           *prometheus.Desc
 
 	processWhitelistPattern *regexp.Regexp
 	processBlacklistPattern *regexp.Regexp
@@ -253,6 +254,12 @@ func newProcessCollector() (Collector, error) {
 			[]string{"process", "process_id", "creating_process_id", "gpu_title"},
 			nil,
 		),
+		GpuUsage: prometheus.NewDesc(
+			prometheus.BuildFQName(Namespace, subsystem, "gpu_usage"),
+			"Gpu usage percentage.",
+			[]string{"process", "process_id", "creating_process_id", "gpu_title"},
+			nil,
+		),
 		processWhitelistPattern: regexp.MustCompile(fmt.Sprintf("^(?:%s)$", *processWhitelist)),
 		processBlacklistPattern: regexp.MustCompile(fmt.Sprintf("^(?:%s)$", *processBlacklist)),
 
@@ -307,14 +314,14 @@ type perflibProcessGpuEngine struct {
 type processGpuMetrics struct {
 	DedicatedUsage        map[string]float64
 	SharedUsage           map[string]float64
-	UtilizationPercentage map[string]map[string]float64
+	UtilizationPercentage map[string]float64
 }
 
 func createProcessGpuMetrics() *processGpuMetrics {
 	return &processGpuMetrics{
 		DedicatedUsage:        make(map[string]float64),
 		SharedUsage:           make(map[string]float64),
-		UtilizationPercentage: make(map[string]map[string]float64),
+		UtilizationPercentage: make(map[string]float64),
 	}
 }
 
@@ -368,6 +375,19 @@ func (processGpuMetrics *processGpuMetrics) exposeMetrics(ch chan<- prometheus.M
 			gpuTitle,
 		)
 	}
+
+	for gpuTitle, utilizationPercentage := range processGpuMetrics.UtilizationPercentage {
+		ch <- prometheus.MustNewConstMetric(
+			c.GpuUsage,
+			prometheus.GaugeValue,
+			utilizationPercentage,
+			processName,
+			pid,
+			cpid,
+			gpuTitle,
+		)
+	}
+
 }
 
 type WorkerProcess struct {
