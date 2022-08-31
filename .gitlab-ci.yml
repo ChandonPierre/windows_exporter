@@ -1,0 +1,126 @@
+---
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH
+      when: always
+
+variables: &global-variables
+  GIT_DEPTH: 1
+  NVIDIA_DEBIAN_VERSION: "515.43.04"
+  NVIDIA_RHEL_VERSION: "510.85.02"
+  BASE_IMG_DIR: "/opt/vm/baseimages"
+  OUTPUT_IMG_DIR: "/opt/vm/images/$CI_COMMIT_REF_NAME"
+  RUNNER_IMAGE: registry.gitlab.com/coreweave/utility-images/packer-qemu-builder:e9ded5a4
+  WINDOWS: "false"
+  LINUX: "false"
+
+image: $RUNNER_IMAGE
+
+default:
+  tags:
+    - ord1-tenant
+
+stages:
+  - checks
+  - gen-ci
+  - trigger-build-ci
+  - tag
+
+checks:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME != "master"'
+      when: manual
+    - if: '$CI_COMMIT_REF_NAME'
+  allow_failure: true
+  stage: checks
+  script:
+    - ./lint.sh
+
+detect-linux:
+  needs: [checks]
+  stage: checks
+  only:
+    changes:
+      - scripts/*
+      - ansible/**/*
+      - configs/linux/*
+  script:
+    - echo "LINUX=true" >> flags.env
+  artifacts:
+    reports:
+      dotenv: flags.env
+
+detect-windows:
+  needs: [checks]
+  stage: checks
+  only:
+    changes:
+      - scripts/windows/**/*
+      - configs/windows/*
+  script:
+    - echo "WINDOWS=true" >> flags.env
+  artifacts:
+    reports:
+      dotenv: flags.env
+
+gen-ci:
+  needs:
+    - job: checks
+      optional: false
+    - job: detect-windows
+      optional: true
+    - job: detect-linux
+      optional: true
+  stage: gen-ci
+  script:
+    - ./ci/gen-ci.sh
+  artifacts:
+    paths:
+      - ci/gen-ci.yaml
+    reports:
+      dotenv: jobs.env
+
+create-runners:
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /skip-build/
+      when: never
+    - if: $CI_COMMIT_MESSAGE
+  needs: [gen-ci]
+  stage: gen-ci
+  script:
+    - ./ci/create_runners.sh
+
+trigger-build-ci:
+  rules:
+    - !reference [create-runners, rules]
+  needs: [create-runners]
+  stage: trigger-build-ci
+  variables:
+    PARENT_PIPELINE: $CI_PIPELINE_ID
+  trigger:
+    forward:
+      pipeline_variables: true
+      yaml_variables: true
+    include:
+      - artifact: ci/gen-ci.yaml
+        job: gen-ci
+    strategy: depend
+
+generate-release-version-tag:
+  needs:
+    - job: trigger-build-ci
+      optional: true
+  image: node:16
+  stage: tag
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  before_script:
+    - npm install
+  script:
+    - CI_BUILD_TOKEN=$CI_JOB_TOKEN npx semantic-release
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - artifacts.env
