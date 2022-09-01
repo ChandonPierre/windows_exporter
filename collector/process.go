@@ -3,11 +3,78 @@
 
 package collector
 
+/*
+#cgo LDFLAGS: -lDXGI
+#include <windows.h>
+#include <dxgi.h>
+
+#include <initguid.h>
+DEFINE_GUID(GUID_IDXGI_FACTORY, 0x7b7166ec, 0x21c7, 0x44ae, 0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69);
+
+struct DxgiAdapterDescription
+{
+	wchar_t description[128];
+	LUID 	luid;
+};
+
+UINT GetDxgiAdapterCount()
+{
+	UINT dxgi_adapter_count = 0;
+	IDXGIFactory *dxgi_factory = NULL;
+	if (CreateDXGIFactory(&GUID_IDXGI_FACTORY, (void**)&dxgi_factory) == S_OK && dxgi_factory != NULL)
+	{
+		IDXGIAdapter *dxgi_adapter = NULL;
+		while ((*dxgi_factory->lpVtbl->EnumAdapters)(dxgi_factory, dxgi_adapter_count, &dxgi_adapter) == S_OK)
+		{
+			dxgi_adapter_count++;
+			if (dxgi_adapter != NULL)
+			{
+				(*dxgi_adapter->lpVtbl->Release)(dxgi_adapter);
+			}
+		}
+		(*dxgi_factory->lpVtbl->Release)(dxgi_factory);
+	}
+	return dxgi_adapter_count;
+}
+
+UINT GetDxgiAdapterDescriptions(struct DxgiAdapterDescription *dxgi_adapter_descriptions, UINT dxgi_adapter_description_count)
+{
+	IDXGIFactory *dxgi_factory = NULL;
+	struct DxgiAdapterDescription *current_dxgi_adapter_description = dxgi_adapter_descriptions;
+	if (CreateDXGIFactory(&GUID_IDXGI_FACTORY, (void**)&dxgi_factory) == S_OK && dxgi_factory != NULL)
+	{
+		UINT dxgi_adapter_index = 0;
+		IDXGIAdapter *dxgi_adapter = NULL;
+		while (dxgi_adapter_description_count && (*dxgi_factory->lpVtbl->EnumAdapters)(dxgi_factory, dxgi_adapter_index, &dxgi_adapter) == S_OK)
+		{
+			dxgi_adapter_index++;
+			if (dxgi_adapter != NULL)
+			{
+				DXGI_ADAPTER_DESC dxgi_adapter_description;
+				if ((*dxgi_adapter->lpVtbl->GetDesc)(dxgi_adapter, &dxgi_adapter_description) == S_OK)
+				{
+					memcpy(current_dxgi_adapter_description->description, dxgi_adapter_description.Description, sizeof(current_dxgi_adapter_description->description));
+					current_dxgi_adapter_description->luid = dxgi_adapter_description.AdapterLuid;
+					++current_dxgi_adapter_description;
+					--dxgi_adapter_description_count;
+				}
+				(*dxgi_adapter->lpVtbl->Release)(dxgi_adapter);
+			}
+		}
+		(*dxgi_factory->lpVtbl->Release)(dxgi_factory);
+		return dxgi_adapter_index;
+	}
+	return current_dxgi_adapter_description - dxgi_adapter_descriptions;
+}
+*/
+import "C"
 import (
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/StackExchange/wmi"
 	"github.com/prometheus-community/windows_exporter/log"
@@ -16,7 +83,7 @@ import (
 )
 
 func init() {
-	registerCollector("process", newProcessCollector, "Process")
+	registerCollector("process", newProcessCollector, "Process", "GPU Process Memory", "GPU Engine", "GPU Adapter Memory")
 }
 
 var (
@@ -31,29 +98,54 @@ var (
 )
 
 type processCollector struct {
-	StartTime         *prometheus.Desc
-	CPUTimeTotal      *prometheus.Desc
-	HandleCount       *prometheus.Desc
-	IOBytesTotal      *prometheus.Desc
-	IOOperationsTotal *prometheus.Desc
-	PageFaultsTotal   *prometheus.Desc
-	PageFileBytes     *prometheus.Desc
-	PoolBytes         *prometheus.Desc
-	PriorityBase      *prometheus.Desc
-	PrivateBytes      *prometheus.Desc
-	ThreadCount       *prometheus.Desc
+	StartTime          *prometheus.Desc
+	CPUTimeTotal       *prometheus.Desc
+	HandleCount        *prometheus.Desc
+	IOBytesTotal       *prometheus.Desc
+	IOOperationsTotal  *prometheus.Desc
+	PageFaultsTotal    *prometheus.Desc
+	PageFileBytes      *prometheus.Desc
+	PoolBytes          *prometheus.Desc
+	PriorityBase       *prometheus.Desc
+	PrivateBytes       *prometheus.Desc
+	ThreadCount        *prometheus.Desc
 	VirtualBytes      *prometheus.Desc
 	WorkingSetPrivate *prometheus.Desc
 	WorkingSetPeak    *prometheus.Desc
 	WorkingSet        *prometheus.Desc
+	GpuSharedMemory    *prometheus.Desc
+	GpuDedicatedMemory *prometheus.Desc
+	GpuUsage           *prometheus.Desc
 
 	processWhitelistPattern *regexp.Regexp
 	processBlacklistPattern *regexp.Regexp
+
+	dxgiAdapterLuidDescriptionMap map[string]string
+}
+
+// https://docs.microsoft.com/en-us/windows/win32/api/dxgi/ns-dxgi-dxgi_adapter_desc
+type dxgiAdapterDescription struct {
+	description  [128]C.wchar_t
+	luidLowPart  C.DWORD
+	luidHighPart C.LONG
 }
 
 // NewProcessCollector ...
 func newProcessCollector() (Collector, error) {
 	const subsystem = "process"
+
+	dxgiAdapterCount := C.GetDxgiAdapterCount()
+	var dxgiAdapterDescriptions []C.struct_DxgiAdapterDescription
+	dxgiAdapterLuidDescriptionMap := make(map[string]string)
+	if dxgiAdapterCount > 0 {
+		dxgiAdapterDescriptions = make([]C.struct_DxgiAdapterDescription, dxgiAdapterCount)
+		dxgiAdapterDescriptionCount := C.GetDxgiAdapterDescriptions(&dxgiAdapterDescriptions[0], dxgiAdapterCount)
+		for dxgiAdapterDescriptionIndex := C.UINT(0); dxgiAdapterDescriptionIndex < dxgiAdapterDescriptionCount; dxgiAdapterDescriptionIndex++ {
+			description := syscall.UTF16ToString((*[128]uint16)(unsafe.Pointer(&dxgiAdapterDescriptions[dxgiAdapterDescriptionIndex].description))[:])
+			luid := fmt.Sprintf("0x%08X_0x%08X", dxgiAdapterDescriptions[dxgiAdapterDescriptionIndex].luid.HighPart, dxgiAdapterDescriptions[dxgiAdapterDescriptionIndex].luid.LowPart)
+			dxgiAdapterLuidDescriptionMap[luid] = description
+		}
+	}
 
 	if *processWhitelist == ".*" && *processBlacklist == "" {
 		log.Warn("No filters specified for process collector. This will generate a very large number of metrics!")
@@ -150,8 +242,28 @@ func newProcessCollector() (Collector, error) {
 			[]string{"process", "process_id", "creating_process_id"},
 			nil,
 		),
+		GpuSharedMemory: prometheus.NewDesc(
+			prometheus.BuildFQName(Namespace, subsystem, "gpu_shared_memory"),
+			"Number of bytes of system memory used as shared memory by the gpu.",
+			[]string{"process", "process_id", "creating_process_id", "gpu_title"},
+			nil,
+		),
+		GpuDedicatedMemory: prometheus.NewDesc(
+			prometheus.BuildFQName(Namespace, subsystem, "gpu_dedicated_memory"),
+			"Number of bytes of dedicated gpu memory used on the gpu.",
+			[]string{"process", "process_id", "creating_process_id", "gpu_title"},
+			nil,
+		),
+		GpuUsage: prometheus.NewDesc(
+			prometheus.BuildFQName(Namespace, subsystem, "gpu_usage"),
+			"Gpu usage percentage.",
+			[]string{"process", "process_id", "creating_process_id", "gpu_title"},
+			nil,
+		),
 		processWhitelistPattern: regexp.MustCompile(fmt.Sprintf("^(?:%s)$", *processWhitelist)),
 		processBlacklistPattern: regexp.MustCompile(fmt.Sprintf("^(?:%s)$", *processBlacklist)),
+
+		dxgiAdapterLuidDescriptionMap: dxgiAdapterLuidDescriptionMap,
 	}, nil
 }
 
@@ -187,9 +299,102 @@ type perflibProcess struct {
 	WorkingSet              float64 `perflib:"Working Set"`
 }
 
+type perflibProcessGpuMemory struct {
+	Name           string
+	DedicatedUsage float64 `perflib:"Dedicated Usage"`
+	SharedUsage    float64 `perflib:"Shared Usage"`
+	TotalCommitted float64 `perflib:"Total Committed"`
+}
+
+type perflibProcessGpuEngine struct {
+	Name                  string
+	UtilizationPercentage float64 `perflib:"Utilization Percentage"`
+}
+
+type processGpuMetrics struct {
+	DedicatedUsage        map[string]float64
+	SharedUsage           map[string]float64
+	UtilizationPercentage map[string]float64
+}
+
+func createProcessGpuMetrics() *processGpuMetrics {
+	return &processGpuMetrics{
+		DedicatedUsage:        make(map[string]float64),
+		SharedUsage:           make(map[string]float64),
+		UtilizationPercentage: make(map[string]float64),
+	}
+}
+
+func (processGpuMetrics *processGpuMetrics) setProcessGpuMemory(processGpuMemory perflibProcessGpuMemory, gpuTitle string) {
+	processGpuMetrics.DedicatedUsage[gpuTitle] = processGpuMemory.DedicatedUsage
+	processGpuMetrics.SharedUsage[gpuTitle] = processGpuMemory.SharedUsage
+}
+
+func (processGpuMetrics *processGpuMetrics) setProcessGpuEngineUsage(processGpuEngine perflibProcessGpuEngine, gpuTitle string) {
+	processGpuMetrics.UtilizationPercentage[gpuTitle] = processGpuEngine.UtilizationPercentage
+}
+
+func (processGpuMetrics *processGpuMetrics) exposeMetrics(ch chan<- prometheus.Metric, c *processCollector, processName string, pid string, cpid string) {
+	// this may come in handy when someone wants to deal with the usage and different engine types
+	// printGpuEngineUsage(processGpuMetrics)
+	for gpuTitle, sharedUsage := range processGpuMetrics.SharedUsage {
+		ch <- prometheus.MustNewConstMetric(
+			c.GpuSharedMemory,
+			prometheus.GaugeValue,
+			sharedUsage,
+			processName,
+			pid,
+			cpid,
+			gpuTitle,
+		)
+	}
+
+	for gpuTitle, dedicatedUsage := range processGpuMetrics.DedicatedUsage {
+		ch <- prometheus.MustNewConstMetric(
+			c.GpuDedicatedMemory,
+			prometheus.GaugeValue,
+			dedicatedUsage,
+			processName,
+			pid,
+			cpid,
+			gpuTitle,
+		)
+	}
+
+	for gpuTitle, utilizationPercentage := range processGpuMetrics.UtilizationPercentage {
+		ch <- prometheus.MustNewConstMetric(
+			c.GpuUsage,
+			prometheus.GaugeValue,
+			utilizationPercentage,
+			processName,
+			pid,
+			cpid,
+			gpuTitle,
+		)
+	}
+
+}
+
 type WorkerProcess struct {
 	AppPoolName string
 	ProcessId   uint64
+}
+
+var pidLuidRegexp = regexp.MustCompile("pid_([0-9]+)_luid_(0x[0-9a-zA-Z]{8}_0x[0-9a-zA-Z]{8})")
+
+func extractPidAndLuid(name string) (string, string) {
+	match := pidLuidRegexp.FindStringSubmatch(name)
+	return match[1], match[2]
+}
+
+var videoEngineTypeRegexp = regexp.MustCompile("engtype_(.+)")
+
+func extractVideoEngineType(name string) *string {
+	match := videoEngineTypeRegexp.FindStringSubmatch(name)
+	if match != nil {
+		return &match[1]
+	}
+	return nil
 }
 
 func (c *processCollector) Collect(ctx *ScrapeContext, ch chan<- prometheus.Metric) error {
@@ -197,6 +402,39 @@ func (c *processCollector) Collect(ctx *ScrapeContext, ch chan<- prometheus.Metr
 	err := unmarshalObject(ctx.perfObjects["Process"], &data)
 	if err != nil {
 		return err
+	}
+
+	// dont check for error when unmarshalling "GPU Process Memory" and "GPU Engine" counters since they may not be present if there are no WDM compatible GPUs
+	processGpuMemory := make([]perflibProcessGpuMemory, 0)
+	unmarshalObject(ctx.perfObjects["GPU Process Memory"], &processGpuMemory)
+
+	gpuEngine := make([]perflibProcessGpuEngine, 0)
+	unmarshalObject(ctx.perfObjects["GPU Engine"], &gpuEngine)
+
+	processGpuMetrics := make(map[string]*processGpuMetrics)
+
+	for _, processGpuMemoryEntry := range processGpuMemory {
+		pid, luid := extractPidAndLuid(processGpuMemoryEntry.Name)
+		_, dxgiAdapterPresent := c.dxgiAdapterLuidDescriptionMap[luid]
+		if dxgiAdapterPresent {
+			_, pidPresent := processGpuMetrics[pid]
+			if pidPresent == false {
+				processGpuMetrics[pid] = createProcessGpuMetrics()
+			}
+			processGpuMetrics[pid].setProcessGpuMemory(processGpuMemoryEntry, c.dxgiAdapterLuidDescriptionMap[luid])
+		}
+
+	}
+	for _, processGpuEngineEntry := range gpuEngine {
+		pid, luid := extractPidAndLuid(processGpuEngineEntry.Name)
+		_, dxgiAdapterPresent := c.dxgiAdapterLuidDescriptionMap[luid]
+		if dxgiAdapterPresent {
+			_, pidPresent := processGpuMetrics[pid]
+			if pidPresent == false {
+				processGpuMetrics[pid] = createProcessGpuMetrics()
+			}
+			processGpuMetrics[pid].setProcessGpuEngineUsage(processGpuEngineEntry, c.dxgiAdapterLuidDescriptionMap[luid])
+		}
 	}
 
 	var dst_wp []WorkerProcess
@@ -421,6 +659,11 @@ func (c *processCollector) Collect(ctx *ScrapeContext, ch chan<- prometheus.Metr
 			pid,
 			cpid,
 		)
+
+		processGpuMetricsEntry, processGpuMetricsEntryPresent := processGpuMetrics[pid]
+		if processGpuMetricsEntryPresent {
+			processGpuMetricsEntry.exposeMetrics(ch, c, processName, pid, cpid)
+		}
 	}
 
 	return nil
