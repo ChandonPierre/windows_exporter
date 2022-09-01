@@ -331,22 +331,7 @@ func (processGpuMetrics *processGpuMetrics) setProcessGpuMemory(processGpuMemory
 }
 
 func (processGpuMetrics *processGpuMetrics) setProcessGpuEngineUsage(processGpuEngine perflibProcessGpuEngine, gpuTitle string) {
-	_, present := processGpuMetrics.UtilizationPercentage[gpuTitle]
-	if present == false {
-		processGpuMetrics.UtilizationPercentage[gpuTitle] = make(map[string]float64)
-	}
-	videoEngineType := extractVideoEngineType(processGpuEngine.Name)
-	if videoEngineType != nil {
-		processGpuMetrics.UtilizationPercentage[gpuTitle][*videoEngineType] = processGpuEngine.UtilizationPercentage
-	}
-}
-
-func printGpuEngineUsage(processGpuMetrics *processGpuMetrics) {
-	for gpuTitle, gpuEngineUsageEntry := range processGpuMetrics.UtilizationPercentage {
-		for gpuEngineTitle, gpuEngineUsage := range gpuEngineUsageEntry {
-			log.Debugf("Engine %s utilization on %s: %f\n", gpuEngineTitle, gpuTitle, gpuEngineUsage)
-		}
-	}
+	processGpuMetrics.UtilizationPercentage[gpuTitle] = processGpuEngine.UtilizationPercentage
 }
 
 func (processGpuMetrics *processGpuMetrics) exposeMetrics(ch chan<- prometheus.Metric, c *processCollector, processName string, pid string, cpid string) {
